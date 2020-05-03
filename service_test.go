@@ -311,7 +311,7 @@ func TestStat(t *testing.T) {
 			} else if err == io.EOF {
 				break
 			}
-			// log.Println("stat1", stat, err)
+			log.Println("stat1", stat, err)
 			mu.Lock()
 			stat1 = stat
 			stat1.Timestamp = 0
@@ -327,7 +327,7 @@ func TestStat(t *testing.T) {
 			} else if err == io.EOF {
 				break
 			}
-			// log.Println("stat2", stat, err)
+			log.Println("stat2", stat, err)
 			mu.Lock()
 			stat2 = stat
 			stat2.Timestamp = 0
