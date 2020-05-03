@@ -2,7 +2,6 @@ package main
 
 import (
 	context "context"
-	"encoding/json"
 	fmt "fmt"
 	"log"
 	"net"
@@ -12,41 +11,28 @@ import (
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc "google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 )
 
 // тут вы пишете код
 // обращаю ваше внимание - в этом задании запрещены глобальные переменные
 
 type Service struct {
-	listenAddress string
-	aclData       map[string][]*regexp.Regexp
-	loggingMtx    *sync.RWMutex
-	logList       []*Event
+	aclData    map[string][]*regexp.Regexp
+	loggingMtx *sync.RWMutex
+	logList    []*Event
 }
 
 func StartMyMicroservice(ctx context.Context, listenAddr string, ACLData string) error {
 	service := Service{}
-	var aclData map[string][]string
-	err := json.Unmarshal([]byte(ACLData), &aclData)
+	logMtx := sync.RWMutex{}
+	aclPaths, err := parseAclDataToRegextp(ACLData)
 
 	if err != nil {
 		return err
 	}
-	aclPaths := make(map[string][]*regexp.Regexp, len(aclData))
 
-	for key, pathList := range aclData {
-		regexPathList := make([]*regexp.Regexp, len(pathList))
-		for i, path := range pathList {
-			regexPathList[i] = regexp.MustCompile(path)
-		}
-		aclPaths[key] = regexPathList
-	}
-
-	logMtx := sync.RWMutex{}
-
-	service.listenAddress = listenAddr
 	service.aclData = aclPaths
 	service.loggingMtx = &logMtx
 
@@ -55,6 +41,7 @@ func StartMyMicroservice(ctx context.Context, listenAddr string, ACLData string)
 		log.Fatalln("cant listet port", err)
 	}
 	server := grpc.NewServer(
+		grpc.StreamInterceptor(service.authStremInterceptor),
 		grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(service.authInterceptor, service.loggingInterceptor)),
 	)
 
@@ -76,16 +63,29 @@ func (b *Service) loggingInterceptor(
 	handler grpc.UnaryHandler,
 ) (interface{}, error) {
 	md, _ := metadata.FromIncomingContext(ctx)
+	peer, _ := peer.FromContext(ctx)
 	b.loggingMtx.Lock()
 	b.logList = append(b.logList, &Event{
 		Timestamp: time.Now().Unix(),
 		Consumer:  md.Get("consumer")[0],
 		Method:    info.FullMethod,
-		Host:      b.listenAddress,
+		Host:      peer.Addr.String(),
 	})
 	b.loggingMtx.Unlock()
 	reply, err := handler(ctx, req)
 	return reply, err
+}
+
+func (b *Service) authStremInterceptor(
+	srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler,
+) error {
+	ctx := ss.Context()
+	md, _ := metadata.FromIncomingContext(ctx)
+	err := performAuth(md, b.aclData, info.FullMethod)
+	if err != nil {
+		return err
+	}
+	return handler(srv, ss)
 }
 
 func (b *Service) authInterceptor(
@@ -94,32 +94,12 @@ func (b *Service) authInterceptor(
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler,
 ) (interface{}, error) {
-
 	md, _ := metadata.FromIncomingContext(ctx)
-	consumer := md.Get("consumer")
-	if len(consumer) < 1 {
-		return nil, grpc.Errorf(codes.Unauthenticated, "no consumer info provided")
+	err := performAuth(md, b.aclData, info.FullMethod)
+	if err != nil {
+		return nil, err
 	}
-	paths, ok := b.aclData[consumer[0]]
-	if !ok {
-		return nil, grpc.Errorf(codes.Unauthenticated, "unknown consumer")
-	}
-
-	// validate path permission
-	var isDenied bool
-	log.Println("Consumer is ", consumer[0])
-	log.Println("Paths is ", paths)
-	log.Println("Full method info is: ", info.FullMethod)
-	for _, path := range paths {
-		if path.MatchString(info.FullMethod) {
-			isDenied = true
-			break
-		}
-	}
-	if isDenied {
-		return handler(ctx, req)
-	}
-	return nil, grpc.Errorf(codes.Unauthenticated, "access to path denied")
+	return handler(ctx, req)
 }
 
 func (b *Service) Logging(in *Nothing, inStream Admin_LoggingServer) error {
